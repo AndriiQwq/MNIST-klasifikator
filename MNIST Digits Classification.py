@@ -12,7 +12,7 @@ import seaborn as sns
 import time
 import os
 import configparser
-from colorama import Fore, Style, init
+from colorama import Fore, init
 
 init(autoreset=True)
 
@@ -20,7 +20,8 @@ config_file = 'config.ini'
 config = configparser.ConfigParser()
 
 """Parameters for the configuration file"""
-load_model = False
+load_model = None
+auto_save_model = None
 optimizer = None
 epoch_count = 0
 train_batch_size = 0
@@ -32,6 +33,7 @@ momentum = 0
 default_config = {
     'Settings': {
         'load_model': 'False',
+        'auto_save_model': 'False',
         'optimizer(sgd, sgd_momentum, adam)': 'adam',
         'epoch_count': '20',
         'train_batch_size': '64',
@@ -45,9 +47,10 @@ default_config = {
 
 def get_config():
     global optimizer, epoch_count, train_batch_size, test_batch_size, show_confusion_matrix, learning_rate, momentum, \
-        load_model
+        load_model, save_model
 
     load_model = config.getboolean('Settings', 'load_model')
+    save_model = config.getboolean('Settings', 'auto_save_model')
     optimizer = config.get('Settings', 'optimizer(sgd, sgd_momentum, adam)')
     epoch_count = config.getint('Settings', 'epoch_count')
     train_batch_size = config.getint('Settings', 'train_batch_size')
@@ -86,36 +89,26 @@ test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False
 class MLP(nn.Module):
     def __init__(self):
         super(MLP, self).__init__()
-        # self.fc1 = nn.Linear(28 * 28, 128)  # Первый слой
-        # self.fc2 = nn.Linear(128, 64)  # Второй слой
-        # self.fc3 = nn.Linear(64, 10)  # Выходной слой
+        self.fc1 = nn.Linear(784, 256)
+        self.fc2 = nn.Linear(256, 64)
+        self.fc3 = nn.Linear(64, 10)
+        #self.dropout = nn.Dropout(0.2)
 
-        # self.fc1 = nn.Linear(28 * 28, 256)
-        # self.fc2 = nn.Linear(256, 128)
-        # self.fc3 = nn.Linear(128, 64)
-        # self.fc4 = nn.Linear(64, 10)
-
-        super(MLP, self).__init__()
-        self.fc1 = nn.Linear(28 * 28, 128)
-        self.fc2 = nn.Linear(128, 10)
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x):  # ReLU, Sigmoid, Tanh
-        x = x.view(-1, 28 * 28)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-
-        #x = torch.tanh(self.fc2(x))
-
-        # x = torch.relu(self.fc1(x))  # Активация ReLU
-        # x = torch.relu(self.fc2(x))  # Активация ReLU
-
-        #x = self.fc4(x)  # Выходной слой
+    def forward(self, x):
+        x = x.view(-1, 784)  # to tensor
+        x = torch.relu(self.fc1(x))
+        #x = self.dropout(x)
+        x = torch.relu(self.fc2(x))
+        #x = self.dropout(x)
+        x = self.fc3(x)  # output layer
         return x
 
 
-model = MLP()
+if load_model == False:
+    model = MLP()
+else:
+    model = torch.load('mnist_model.pth')
+    print(Fore.YELLOW + 'Model loaded')
 
 """Loss function"""
 criterion = nn.CrossEntropyLoss()
@@ -128,55 +121,16 @@ elif optimizer == 'sgd_momentum':
 elif optimizer == 'adam':
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+torch.manual_seed(1)
 
-def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=10):
-    train_losses = []
-    test_accuracies = []
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
-    for epoch in range(epochs):
-        model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-
-        for inputs, labels in train_loader:
-            optimizer.zero_grad()
-
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item()
-
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-        train_losses.append(running_loss / len(train_loader))
-        accuracy = correct / total
-        test_accuracy = evaluate_model(model, test_loader)
-        test_accuracies.append(test_accuracy)
-
-        print(Fore.LIGHTMAGENTA_EX + f"Epoch {epoch + 1}/{epochs},",
-              Fore.LIGHTRED_EX + f" Train Loss: {running_loss / len(train_loader):.4f}, ",
-              Fore.LIGHTGREEN_EX + f"Train Accuracy: {accuracy:.4f}, ",
-              Fore.LIGHTCYAN_EX + f"Test Accuracy: {test_accuracy:.4f}")
-
-    return train_losses, test_accuracies
-
-
-def evaluate_model(model, test_loader):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    return correct / total
+print(f'Using device: {device}')
 
 
 def plot_metrics(train_losses, test_accuracies):
@@ -194,6 +148,109 @@ def plot_metrics(train_losses, test_accuracies):
     plt.legend()
 
     plt.show()
+
+
+def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=10):
+    global save_model
+
+    best_result = {
+        'max_accuracy': 0,
+        'epoch': 0,
+        'train_loss': 0,
+        'train_accuracy': 0
+    }
+
+    accepting_rate = 0.97
+    training_losses = []
+    evaluation_accuracies = []
+
+    """"TTL - Time to live. If model does not update its accuracy by count of lives,
+        process of find best model will be terminated"""
+    live = 50
+    TTL = live
+
+    for epoch in range(epochs):
+        model.train()
+
+        """Training information"""
+        training_info = {
+            'running_loss': 0.0,
+            'correct': 0,
+            'total': 0
+        }
+
+        for inputs, labels in train_loader:
+            optimizer.zero_grad()
+
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            """Append training information"""
+            training_info['running_loss'] += loss.item()
+            _, predicted = torch.max(outputs, 1)  # predicated output
+            training_info['total'] += labels.size(0)
+            training_info['correct'] += (predicted == labels).sum().item()
+
+        training_accuracy = training_info['correct'] / training_info['total']
+        training_losses.append(training_info['running_loss'] / len(train_loader))
+
+        """Evaluation model"""
+        evaluation_accuracy = evaluate_model(model, test_loader)
+        evaluation_accuracies.append(evaluation_accuracy)
+
+        if evaluation_accuracy > best_result['max_accuracy']:
+            best_result['max_accuracy'] = evaluation_accuracy
+            best_result['epoch'] = epoch
+            best_result['train_loss'] = training_info['running_loss'] / len(train_loader)
+            best_result['train_accuracy'] = training_accuracy
+
+            TTL = live
+            if save_model and best_result['max_accuracy'] > accepting_rate:
+                torch.save(model.state_dict(), 'mnist_model.pth')
+        else:
+            TTL -= 1
+
+        """Logging"""
+        print(Fore.GREEN + "--------------------------------------------------------------------------------\n",
+              Fore.LIGHTMAGENTA_EX + f"Epoch {epoch + 1},",
+              Fore.LIGHTRED_EX + f" Train Loss: {training_info['running_loss'] / len(train_loader):.4f}, ",
+              Fore.LIGHTGREEN_EX + f"Train Accuracy: {training_accuracy:.4f}, ",
+              Fore.LIGHTCYAN_EX + f"Test Accuracy: {evaluation_accuracy:.4f}",
+              Fore.GREEN + "\n--------------------------------------------------------------------------------")
+
+        if TTL == 0:
+            print(Fore.GREEN + f"Best model was not reached by {live} hope.")
+            break
+
+    print(Fore.LIGHTGREEN_EX + f"Best epoch {best_result['epoch']} with:"
+                               f"Train Loss: {best_result['train_loss']:.4f}, "
+                               f"Train Accuracy: {best_result['train_accuracy']:.4f}, "
+                               f"Test Accuracy: {best_result['max_accuracy']:.4f}")
+
+    plot_metrics(training_losses, evaluation_accuracies)
+
+    return model
+
+
+def evaluate_model(model, test_loader):
+    model.eval()
+
+    training_info = {
+        'correct': 0,
+        'total': 0
+    }
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            training_info['total'] += labels.size(0)
+            training_info['correct'] += (predicted == labels).sum().item()
+
+    evaluation_accuracy = training_info['correct'] / training_info['total']
+    return evaluation_accuracy
 
 
 def plot_confusion_matrix(model, test_loader):
@@ -217,8 +274,8 @@ if __name__ == '__main__':
     global save_model
     start_time = time.time()
 
-    train_losses, test_accuracies = train_model(model, criterion, optimizer, train_loader, test_loader,
-                                                epoch_count)
+    model = train_model(model, criterion, optimizer, train_loader, test_loader,
+                        epoch_count)
 
     end_time = time.time()
 
@@ -234,8 +291,6 @@ if __name__ == '__main__':
     if save_model:
         torch.save(model.state_dict(), 'mnist_model.pth')
         print('Model saved')
-
-    plot_metrics(train_losses, test_accuracies)
 
     if show_confusion_matrix:
         plot_confusion_matrix(model, test_loader)
