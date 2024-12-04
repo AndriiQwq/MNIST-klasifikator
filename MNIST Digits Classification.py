@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import seaborn as sns
 
 import time
@@ -89,18 +89,23 @@ test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False
 class MLP(nn.Module):
     def __init__(self):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(784, 256)
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 10)
-        #self.dropout = nn.Dropout(0.2)
+        self.fc1 = nn.Linear(784, 128)
+
+        self.fc2 = nn.Linear(128, 10)
+
+        #self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
-        x = x.view(-1, 784)  # to tensor
+        x = x.view(-1, 784)
         x = torch.relu(self.fc1(x))
         #x = self.dropout(x)
-        x = torch.relu(self.fc2(x))
+        # x = torch.relu(self.fc2(x))
+        # x = torch.relu(self.fc3(x))
         #x = self.dropout(x)
-        x = self.fc3(x)  # output layer
+        #x = torch.selu(self.fc3(x))
+        #x = torch.selu(self.fc4(x))
+        #x = self.dropout(x)
+        x = self.fc2(x)  # output layer
         return x
 
 
@@ -111,7 +116,7 @@ else:
     print(Fore.YELLOW + 'Model loaded')
 
 """Loss function"""
-criterion = nn.CrossEntropyLoss()
+loss_function = nn.CrossEntropyLoss()
 
 """Optimizers"""
 if optimizer == 'sgd':
@@ -133,7 +138,7 @@ else:
 print(f'Using device: {device}')
 
 
-def plot_metrics(train_losses, test_accuracies):
+def plot_training_losses(train_losses, test_accuracies):
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
     plt.plot(train_losses, label='Train Loss')
@@ -150,23 +155,54 @@ def plot_metrics(train_losses, test_accuracies):
     plt.show()
 
 
-def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=10):
+def plot_testing_losses(evaluate_loss, evaluate_accuracy):
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(evaluate_loss, label='Evaluate Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(evaluate_accuracy, label='Evaluate Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    plt.show()
+
+
+
+def plot_confusion_matrix(model):
+    _, _, all_preds, all_labels = evaluate_model(model)
+
+    cm = confusion_matrix(all_labels, all_preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=range(10))
+    disp.plot(cmap='Blues')
+    plt.title("Confusion Matrix")
+    plt.show()
+
+
+def train_model(model, optimizer, epochs=10):
     global save_model
 
     best_result = {
         'max_accuracy': 0,
+        'eval_loss': 0,
         'epoch': 0,
         'train_loss': 0,
         'train_accuracy': 0
     }
 
     accepting_rate = 0.97
+    training_accuracies = []
     training_losses = []
     evaluation_accuracies = []
+    evaluation_losses = []
 
     """"TTL - Time to live. If model does not update its accuracy by count of lives,
         process of find best model will be terminated"""
-    live = 50
+    live = 150
     TTL = live
 
     for epoch in range(epochs):
@@ -183,7 +219,7 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=1
             optimizer.zero_grad()
 
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            loss = loss_function(outputs, labels)
             loss.backward()
             optimizer.step()
 
@@ -194,17 +230,20 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=1
             training_info['correct'] += (predicted == labels).sum().item()
 
         training_accuracy = training_info['correct'] / training_info['total']
+        training_accuracies.append(training_accuracy)
         training_losses.append(training_info['running_loss'] / len(train_loader))
 
         """Evaluation model"""
-        evaluation_accuracy = evaluate_model(model, test_loader)
+        evaluation_accuracy, evaluation_loss, _, _ = evaluate_model(model)
         evaluation_accuracies.append(evaluation_accuracy)
+        evaluation_losses.append(evaluation_loss)
 
         if evaluation_accuracy > best_result['max_accuracy']:
             best_result['max_accuracy'] = evaluation_accuracy
             best_result['epoch'] = epoch
             best_result['train_loss'] = training_info['running_loss'] / len(train_loader)
             best_result['train_accuracy'] = training_accuracy
+            best_result['eval_loss'] = evaluation_loss
 
             TTL = live
             if save_model and best_result['max_accuracy'] > accepting_rate:
@@ -217,6 +256,7 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=1
               Fore.LIGHTMAGENTA_EX + f"Epoch {epoch + 1},",
               Fore.LIGHTRED_EX + f" Train Loss: {training_info['running_loss'] / len(train_loader):.4f}, ",
               Fore.LIGHTGREEN_EX + f"Train Accuracy: {training_accuracy:.4f}, ",
+              Fore.LIGHTCYAN_EX + f"Test Loss: {evaluation_loss:.4f}, ",
               Fore.LIGHTCYAN_EX + f"Test Accuracy: {evaluation_accuracy:.4f}",
               Fore.GREEN + "\n--------------------------------------------------------------------------------")
 
@@ -224,58 +264,57 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, epochs=1
             print(Fore.GREEN + f"Best model was not reached by {live} hope.")
             break
 
-    print(Fore.LIGHTGREEN_EX + f"Best epoch {best_result['epoch']} with:"
+    """Conclusion"""
+    print(Fore.LIGHTGREEN_EX + f"\n\n\nBest epoch {best_result['epoch']} with:"
                                f"Train Loss: {best_result['train_loss']:.4f}, "
                                f"Train Accuracy: {best_result['train_accuracy']:.4f}, "
+                               f"Test Loss: {best_result['eval_loss']:.4f}, "
                                f"Test Accuracy: {best_result['max_accuracy']:.4f}")
 
-    plot_metrics(training_losses, evaluation_accuracies)
+    """Plotting graphs"""
+    plot_testing_losses(evaluation_losses, evaluation_accuracies)
+    plot_training_losses(training_losses, training_accuracies)
 
-    return model
+    if show_confusion_matrix:
+        plot_confusion_matrix(model)
 
 
-def evaluate_model(model, test_loader):
+
+def evaluate_model(model):
     model.eval()
 
     training_info = {
         'correct': 0,
-        'total': 0
+        'total': 0,
+        'running_loss': 0.0
     }
+    all_preds = []
+    all_labels = []
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             outputs = model(inputs)
+            loss = loss_function(outputs, labels)
+
             _, predicted = torch.max(outputs, 1)
             training_info['total'] += labels.size(0)
             training_info['correct'] += (predicted == labels).sum().item()
+            training_info['running_loss'] += loss.item()
+
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
     evaluation_accuracy = training_info['correct'] / training_info['total']
-    return evaluation_accuracy
+    evaluation_loss = training_info['running_loss'] / len(test_loader)
+    return evaluation_accuracy, evaluation_loss, all_preds, all_labels
 
-
-def plot_confusion_matrix(model, test_loader):
-    """Confusion matrix"""
-    y_true = []
-    y_pred = []
-    for inputs, labels in test_loader:
-        outputs = model(inputs)
-        _, predicted = torch.max(outputs, 1)
-        y_true.extend(labels.numpy())
-        y_pred.extend(predicted.numpy())
-
-    cm = confusion_matrix(y_true, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.show()
 
 
 if __name__ == '__main__':
     global save_model
     start_time = time.time()
 
-    model = train_model(model, criterion, optimizer, train_loader, test_loader,
-                        epoch_count)
+    train_model(model, optimizer, epoch_count)
 
     end_time = time.time()
 
@@ -291,6 +330,3 @@ if __name__ == '__main__':
     if save_model:
         torch.save(model.state_dict(), 'mnist_model.pth')
         print('Model saved')
-
-    if show_confusion_matrix:
-        plot_confusion_matrix(model, test_loader)
