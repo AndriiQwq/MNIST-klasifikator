@@ -89,23 +89,24 @@ test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False
 class MLP(nn.Module):
     def __init__(self):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(784, 128)
-
-        self.fc2 = nn.Linear(128, 10)
+        self.fc1 = nn.Linear(784, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc4 = nn.Linear(64, 10)
+        self.dropout = nn.Dropout(0.2)
 
         #self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         x = x.view(-1, 784)
         x = torch.relu(self.fc1(x))
-        #x = self.dropout(x)
-        # x = torch.relu(self.fc2(x))
-        # x = torch.relu(self.fc3(x))
-        #x = self.dropout(x)
-        #x = torch.selu(self.fc3(x))
-        #x = torch.selu(self.fc4(x))
-        #x = self.dropout(x)
-        x = self.fc2(x)  # output layer
+        x = self.dropout(x)
+        x = torch.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = torch.relu(self.fc3(x))
+        x = self.dropout(x)
+
+        x = self.fc4(x)  # output layer
         return x
 
 
@@ -118,7 +119,7 @@ else:
 """Loss function"""
 loss_function = nn.CrossEntropyLoss()
 
-"""Optimizers"""
+"""Activation function"""
 if optimizer == 'sgd':
     optimizer = optim.SGD(model.parameters(), lr=learning_rate)  # nesterov=True
 elif optimizer == 'sgd_momentum':
@@ -174,7 +175,7 @@ def plot_testing_losses(evaluate_loss, evaluate_accuracy):
 
 
 def plot_confusion_matrix(model):
-    _, _, all_preds, all_labels = evaluate_model(model)
+    _, _, all_preds, all_labels = evaluate(model)
 
     cm = confusion_matrix(all_labels, all_preds)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=range(10))
@@ -183,7 +184,7 @@ def plot_confusion_matrix(model):
     plt.show()
 
 
-def train_model(model, optimizer, epochs=10):
+def train(model, optimizer, epochs=10):
     global save_model
 
     best_result = {
@@ -218,14 +219,14 @@ def train_model(model, optimizer, epochs=10):
         for inputs, labels in train_loader:
             optimizer.zero_grad()
 
-            outputs = model(inputs)
-            loss = loss_function(outputs, labels)
+            output = model(inputs)
+            loss = loss_function(output, labels)
             loss.backward()
             optimizer.step()
 
             """Append training information"""
             training_info['running_loss'] += loss.item()
-            _, predicted = torch.max(outputs, 1)  # predicated output
+            _, predicted = torch.max(output, 1)  # predicated output
             training_info['total'] += labels.size(0)
             training_info['correct'] += (predicted == labels).sum().item()
 
@@ -234,7 +235,7 @@ def train_model(model, optimizer, epochs=10):
         training_losses.append(training_info['running_loss'] / len(train_loader))
 
         """Evaluation model"""
-        evaluation_accuracy, evaluation_loss, _, _ = evaluate_model(model)
+        evaluation_accuracy, evaluation_loss, _, _ = evaluate(model)
         evaluation_accuracies.append(evaluation_accuracy)
         evaluation_losses.append(evaluation_loss)
 
@@ -253,11 +254,11 @@ def train_model(model, optimizer, epochs=10):
 
         """Logging"""
         print(Fore.GREEN + "--------------------------------------------------------------------------------\n",
-              Fore.LIGHTMAGENTA_EX + f"Epoch {epoch + 1},",
-              Fore.LIGHTRED_EX + f" Train Loss: {training_info['running_loss'] / len(train_loader):.4f}, ",
-              Fore.LIGHTGREEN_EX + f"Train Accuracy: {training_accuracy:.4f}, ",
-              Fore.LIGHTCYAN_EX + f"Test Loss: {evaluation_loss:.4f}, ",
-              Fore.LIGHTCYAN_EX + f"Test Accuracy: {evaluation_accuracy:.4f}",
+              Fore.MAGENTA + f"Epoch {epoch + 1},",
+              Fore.RED + f" Train Loss: {training_info['running_loss'] / len(train_loader):.4f}, ",
+              Fore.GREEN + f"Train Accuracy: {training_accuracy:.4f}, ",
+              Fore.RED + f"Test Loss: {evaluation_loss:.4f}, ",
+              Fore.GREEN + f"Test Accuracy: {evaluation_accuracy:.4f}",
               Fore.GREEN + "\n--------------------------------------------------------------------------------")
 
         if TTL == 0:
@@ -280,7 +281,7 @@ def train_model(model, optimizer, epochs=10):
 
 
 
-def evaluate_model(model):
+def evaluate(model):
     model.eval()
 
     training_info = {
@@ -291,18 +292,22 @@ def evaluate_model(model):
     all_preds = []
     all_labels = []
 
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            outputs = model(inputs)
-            loss = loss_function(outputs, labels)
+    for input, label in test_loader:
+        with torch.no_grad():
 
+            outputs = model(input)
+            loss = loss_function(outputs, label)
+    
             _, predicted = torch.max(outputs, 1)
-            training_info['total'] += labels.size(0)
-            training_info['correct'] += (predicted == labels).sum().item()
+            training_info['total'] += label.size(0)
+    
+            correct_pred = (predicted == label).sum().item()
+            training_info['correct'] += correct_pred
+    
             training_info['running_loss'] += loss.item()
-
+    
             all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_labels.extend(label.cpu().numpy())
 
     evaluation_accuracy = training_info['correct'] / training_info['total']
     evaluation_loss = training_info['running_loss'] / len(test_loader)
@@ -314,7 +319,7 @@ if __name__ == '__main__':
     global save_model
     start_time = time.time()
 
-    train_model(model, optimizer, epoch_count)
+    train(model, optimizer, epoch_count)
 
     end_time = time.time()
 
