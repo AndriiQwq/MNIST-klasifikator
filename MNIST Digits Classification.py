@@ -29,6 +29,8 @@ test_batch_size = 0
 show_confusion_matrix = False
 learning_rate = 0
 momentum = 0
+early_stopping_patience = 150
+accepting_accuracy_rate = 0.97
 
 default_config = {
     'Settings': {
@@ -41,13 +43,15 @@ default_config = {
         'show_confusion_matrix': 'False',
         'learning_rate': '0.01',
         'momentum': '0.9',
+        'early_stopping_patience': '150',
+        'accepting_accuracy_rate': '0.97',
     }
 }
 
 
 def get_config():
     global optimizer, epoch_count, train_batch_size, test_batch_size, show_confusion_matrix, learning_rate, momentum, \
-        load_model, save_model
+        load_model, save_model, early_stopping_patience, accepting_accuracy_rate
 
     load_model = config.getboolean('Settings', 'load_model')
     save_model = config.getboolean('Settings', 'auto_save_model')
@@ -58,6 +62,8 @@ def get_config():
     show_confusion_matrix = config.getboolean('Settings', 'show_confusion_matrix')
     learning_rate = config.getfloat('Settings', 'learning_rate')
     momentum = config.getfloat('Settings', 'momentum')
+    early_stopping_patience = config.getint('Settings', 'early_stopping_patience')
+    accepting_accuracy_rate = config.getfloat('Settings', 'accepting_accuracy_rate')
 
 
 if not os.path.exists(config_file):
@@ -110,11 +116,25 @@ class MLP(nn.Module):
         return x
 
 
+torch.manual_seed(1)
+
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
+
+print(f'Using device: {device}')
+
 if load_model == False:
     model = MLP()
 else:
     model = torch.load('mnist_model.pth')
     print(Fore.YELLOW + 'Model loaded')
+
+# Move model to the device(GPU/CPU)
+model = model.to(device)
 
 """Loss function"""
 loss_function = nn.CrossEntropyLoss()
@@ -126,17 +146,6 @@ elif optimizer == 'sgd_momentum':
     optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
 elif optimizer == 'adam':
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-torch.manual_seed(1)
-
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
-
-print(f'Using device: {device}')
 
 
 def plot_training_losses(train_losses, test_accuracies):
@@ -195,7 +204,7 @@ def train(model, optimizer, epochs=10):
         'train_accuracy': 0
     }
 
-    accepting_rate = 0.97
+    # Use parameters from config
     training_accuracies = []
     training_losses = []
     evaluation_accuracies = []
@@ -203,8 +212,7 @@ def train(model, optimizer, epochs=10):
 
     """"TTL - Time to live. If model does not update its accuracy by count of lives,
         process of find best model will be terminated"""
-    live = 150
-    TTL = live
+    TTL = early_stopping_patience
 
     for epoch in range(epochs):
         model.train()
@@ -217,6 +225,9 @@ def train(model, optimizer, epochs=10):
         }
 
         for inputs, labels in train_loader:
+            # Transfer inputs and labels to the device (GPU/CPU)
+            inputs, labels = inputs.to(device), labels.to(device)
+            
             optimizer.zero_grad()
 
             output = model(inputs)
@@ -246,8 +257,8 @@ def train(model, optimizer, epochs=10):
             best_result['train_accuracy'] = training_accuracy
             best_result['eval_loss'] = evaluation_loss
 
-            TTL = live
-            if save_model and best_result['max_accuracy'] > accepting_rate:
+            TTL = early_stopping_patience
+            if save_model and best_result['max_accuracy'] > accepting_accuracy_rate:
                 torch.save(model.state_dict(), 'mnist_model.pth')
         else:
             TTL -= 1
@@ -262,7 +273,7 @@ def train(model, optimizer, epochs=10):
               Fore.GREEN + "\n--------------------------------------------------------------------------------")
 
         if TTL == 0:
-            print(Fore.GREEN + f"Best model was not reached by {live} hope.")
+            print(Fore.GREEN + f"Best model was not reached by {early_stopping_patience} hope.")
             break
 
     """Conclusion"""
@@ -293,6 +304,9 @@ def evaluate(model):
     all_labels = []
 
     for input, label in test_loader:
+        # Transfer inputs and labels to the device (GPU/CPU)
+        input, label = input.to(device), label.to(device)
+        
         with torch.no_grad():
 
             outputs = model(input)
